@@ -1,0 +1,10 @@
+{
+  "signals": [],
+  "stats": {
+    "totalSignals": 0,
+    "profitableSignals": 0,
+    "accuracy": 0,
+    "avgReturn": 0
+  },
+  "lastUpdated": null
+}
