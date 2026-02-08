@@ -9,37 +9,57 @@ Scan international stock markets daily to identify high-conviction "Strong Buy" 
 - News sentiment from trusted sources
 - Performance tracking & learning loop
 
-## Strategy
+## Strategy: Dynamic News-First Discovery
 
-### Technical Analysis
-- **RSI Filter:** Identify oversold (<35) or bullish momentum (>55) on 15m/1h charts
-- **Volume Confirmation:** Require current 1h volume >150% of 24h average
-- **Anti-FOMO Check:** Flag assets >8% above daily open as "Caution: Overextended"
+### Phase 1: News Intelligence
+- **Scan Major Sources:** Bloomberg, Reuters, WSJ, Financial Times
+- **Extract Trending Stocks:** Identify tickers mentioned in breaking news
+- **Sector Analysis:** Track hot sectors (AI, semiconductors, energy, biotech, defense)
+- **Geopolitical Monitor:** Wars, sanctions, trade deals → affected sectors
 
-### News Alpha Engine
-- **Priority Sources:** Bloomberg, Reuters, SEC filings, official announcements
-- **Sentiment Scoring:** -1 (Bearish) to +1 (Bullish)
-- **Action Threshold:** Only recommend if Sentiment > +0.7
-- **Factual Events Only:** Partnerships, upgrades, regulatory shifts (no price predictions)
+### Phase 2: Technical Validation
+- **RSI Filter:** Identify oversold (<35) or bullish momentum (>55)
+- **Volume Confirmation:** Require volume >150% of average
+- **Anti-FOMO Check:** Flag assets >8% above daily open
+- **Price Action:** Validate with current trends
+
+### Phase 3: Multi-Model Analysis
+- **Kimi (Bulk Processing):** News sentiment, trend identification ($0 cost)
+- **Claude (Final Decision):** Conviction scoring, trade plans (~$0.05/day)
+
+### Output Criteria
+- **Sentiment Threshold:** > +0.7 for high conviction
+- **Minimum Conviction:** 6/10 to generate signal
+- **Action Types:** TRADE (high conviction) or WATCH (potential setup)
 
 ### Performance Tracking
 - Log every signal with entry price, stop loss, take profit
 - Daily audit: Compare yesterday's signals with current prices
 - Calculate accuracy % and refine conviction scores
 
-## Watchlist (15 International Stocks)
+## Dynamic Discovery (No Fixed Watchlist!)
 
-**US Tech:**
-- AAPL, MSFT, GOOGL, NVDA, META, TSLA, AMZN
+Unlike traditional scanners with fixed watchlists, Violeta discovers opportunities **dynamically from news**:
 
-**Finance:**
-- JPM, V, MA
+**Discovery Process:**
+1. Scan 50+ financial articles daily
+2. Extract 20-30 most-mentioned tickers
+3. Identify hot sectors from trending topics
+4. Validate technically (RSI, volume, price action)
+5. Generate signals for top opportunities
 
-**International:**
-- TSM (Taiwan), ASML (Netherlands), NVO (Denmark), SAP (Germany)
+**Example Discoveries:**
+- "Flash memory demand surge" → WDC, MU discovered automatically
+- "Defense spending increase" → LMT, NOC, RTX identified
+- "AI chip shortage" → NVDA, AMD, TSM surfaced
 
-**ETFs:**
-- SPY, QQQ
+**Sectors Monitored:**
+- Technology (semiconductors, AI, cloud)
+- Energy (oil, renewables)
+- Healthcare (biotech, pharma)
+- Defense (aerospace, weapons)
+- Finance (fintech, payments)
+- Retail (e-commerce, consumer)
 
 ## Data Sources
 

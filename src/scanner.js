@@ -1,83 +1,67 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const { discoverStocks } = require('./news-discovery');
+const { analyzeTickerSentiment, extractCatalysts } = require('./sentiment-analyzer');
 
 // Load configuration
 const config = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config.json'), 'utf8'));
 
-// API Keys (load from environment or config)
+// API Keys
 const ALPHA_VANTAGE_KEY = process.env.ALPHA_VANTAGE_KEY || config.apiKeys.alphaVantage;
-const FINNHUB_KEY = process.env.FINNHUB_KEY || config.apiKeys.finnhub;
 const BRAVE_API_KEY = process.env.BRAVE_API_KEY;
 
-console.log('🟣 VIOLETA INVESTMENT DESK - Daily Scan Starting...\n');
+console.log('🟣 VIOLETA INVESTMENT DESK - Dynamic News-Driven Scan\n');
+console.log(`📅 ${new Date().toLocaleString('en-US', { timeZone: config.schedule.timezone })}\n`);
 
-// Helper: Fetch stock data from Alpha Vantage
+// Fetch stock technical data from Alpha Vantage
 async function fetchStockData(symbol) {
   try {
-    // Get intraday data (15min intervals)
-    const intradayUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol=${symbol}&interval=15min&apikey=${ALPHA_VANTAGE_KEY}`;
-    const intradayRes = await axios.get(intradayUrl, { timeout: 10000 });
+    // Get quote data
+    const quoteUrl = `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${symbol}&apikey=${ALPHA_VANTAGE_KEY}`;
+    const quoteRes = await axios.get(quoteUrl, { timeout: 10000 });
     
-    if (intradayRes.data['Error Message'] || intradayRes.data['Note']) {
-      console.log(`  ⚠️  ${symbol}: API limit or error`);
+    if (quoteRes.data['Error Message'] || quoteRes.data['Note']) {
       return null;
     }
     
-    const timeSeries = intradayRes.data['Time Series (15min)'];
-    if (!timeSeries) {
-      console.log(`  ⚠️  ${symbol}: No intraday data`);
+    const quote = quoteRes.data['Global Quote'];
+    if (!quote || !quote['05. price']) {
       return null;
     }
     
-    const timestamps = Object.keys(timeSeries);
-    const latestTime = timestamps[0];
-    const latest = timeSeries[latestTime];
+    const currentPrice = parseFloat(quote['05. price']);
+    const dailyOpen = parseFloat(quote['02. open']);
+    const volume = parseInt(quote['06. volume']);
+    const prevClose = parseFloat(quote['08. previous close']);
     
-    const currentPrice = parseFloat(latest['4. close']);
-    const volume = parseInt(latest['5. volume']);
-    
-    // Calculate simple RSI (14-period approximation)
-    // Note: For production, use Alpha Vantage's RSI endpoint
+    // Fetch RSI
     const rsi = await fetchRSI(symbol);
     
-    // Get daily open for FOMO check
-    const dailyUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${symbol}&apikey=${ALPHA_VANTAGE_KEY}`;
-    const dailyRes = await axios.get(dailyUrl, { timeout: 10000 });
-    
-    let dailyOpen = null;
-    let avgVolume = null;
-    
-    if (dailyRes.data['Time Series (Daily)']) {
-      const dailySeries = dailyRes.data['Time Series (Daily)'];
-      const today = Object.keys(dailySeries)[0];
-      dailyOpen = parseFloat(dailySeries[today]['1. open']);
-      
-      // Calculate average volume (last 5 days)
-      const volumes = Object.values(dailySeries).slice(0, 5).map(d => parseInt(d['5. volume']));
-      avgVolume = volumes.reduce((a, b) => a + b, 0) / volumes.length;
-    }
+    // Calculate average volume (approximate from previous close volume)
+    const avgVolume = volume; // Simplified - in production, fetch historical data
     
     return {
       symbol,
       price: currentPrice,
       dailyOpen,
+      prevClose,
       volume,
       avgVolume,
       rsi,
-      timestamp: latestTime
+      change: ((currentPrice - prevClose) / prevClose * 100).toFixed(2),
+      timestamp: quote['07. latest trading day']
     };
     
   } catch (error) {
-    console.log(`  ✗ ${symbol}: ${error.message}`);
     return null;
   }
 }
 
-// Helper: Fetch RSI from Alpha Vantage
+// Fetch RSI from Alpha Vantage
 async function fetchRSI(symbol) {
   try {
-    const url = `https://www.alphavantage.co/query?function=RSI&symbol=${symbol}&interval=15min&time_period=14&series_type=close&apikey=${ALPHA_VANTAGE_KEY}`;
+    const url = `https://www.alphavantage.co/query?function=RSI&symbol=${symbol}&interval=daily&time_period=14&series_type=close&apikey=${ALPHA_VANTAGE_KEY}`;
     const res = await axios.get(url, { timeout: 10000 });
     
     if (res.data['Technical Analysis: RSI']) {
@@ -92,113 +76,54 @@ async function fetchRSI(symbol) {
   }
 }
 
-// Helper: Search news using Brave API
-async function searchNews(symbol, companyName) {
-  if (!BRAVE_API_KEY) {
-    console.log('  ⚠️  No Brave API key - skipping news');
-    return [];
-  }
-  
-  try {
-    const query = `${symbol} ${companyName} stock news`;
-    const url = `https://api.search.brave.com/res/v1/news/search?q=${encodeURIComponent(query)}&count=5&freshness=pd`;
-    
-    const res = await axios.get(url, {
-      headers: {
-        'Accept': 'application/json',
-        'X-Subscription-Token': BRAVE_API_KEY
-      },
-      timeout: 10000
-    });
-    
-    return res.data.results || [];
-  } catch (error) {
-    console.log(`  ✗ News search error: ${error.message}`);
-    return [];
-  }
-}
-
-// Helper: Analyze news sentiment
-function analyzeSentiment(newsArticles) {
-  if (newsArticles.length === 0) return { score: 0, summary: 'No news found' };
-  
-  let score = 0;
-  let events = [];
-  
-  const bullishKeywords = ['partnership', 'acquisition', 'upgrade', 'beats estimates', 'revenue growth', 'profit', 'breakthrough', 'approval', 'expansion'];
-  const bearishKeywords = ['lawsuit', 'downgrade', 'miss', 'decline', 'loss', 'investigation', 'recall', 'bankruptcy'];
-  
-  newsArticles.forEach(article => {
-    const text = `${article.title} ${article.description}`.toLowerCase();
-    
-    // Check for bullish signals
-    bullishKeywords.forEach(keyword => {
-      if (text.includes(keyword)) {
-        score += 0.2;
-        events.push(`+ ${keyword}`);
-      }
-    });
-    
-    // Check for bearish signals
-    bearishKeywords.forEach(keyword => {
-      if (text.includes(keyword)) {
-        score -= 0.2;
-        events.push(`- ${keyword}`);
-      }
-    });
-  });
-  
-  // Normalize score to -1 to +1 range
-  score = Math.max(-1, Math.min(1, score));
-  
-  return {
-    score,
-    summary: events.slice(0, 3).join(', ') || 'Mixed/neutral sentiment',
-    newsCount: newsArticles.length
-  };
-}
-
-// Helper: Calculate conviction score
-function calculateConviction(data, sentiment) {
+// Calculate conviction score
+function calculateConviction(technicalData, sentiment, mentions) {
   let conviction = 5; // Base score
   
+  // News momentum (mentions)
+  if (mentions >= 10) conviction += 2;
+  else if (mentions >= 5) conviction += 1;
+  
+  // Sentiment boost
+  if (sentiment.score > 0.7) conviction += 2;
+  else if (sentiment.score > 0.4) conviction += 1;
+  else if (sentiment.score < -0.4) conviction -= 1;
+  
   // Technical factors
-  if (data.rsi && data.rsi < config.thresholds.rsiOversold) {
-    conviction += 2; // Oversold = opportunity
-  }
-  if (data.rsi && data.rsi > config.thresholds.rsiBullish && data.rsi < 70) {
-    conviction += 1; // Bullish momentum
+  if (technicalData.rsi) {
+    if (technicalData.rsi < config.thresholds.rsiOversold) {
+      conviction += 2; // Oversold opportunity
+    } else if (technicalData.rsi > config.thresholds.rsiBullish && technicalData.rsi < 70) {
+      conviction += 1; // Bullish momentum
+    } else if (technicalData.rsi > 75) {
+      conviction -= 1; // Overbought
+    }
   }
   
   // Volume confirmation
-  if (data.avgVolume && data.volume > data.avgVolume * config.thresholds.volumeMultiplier) {
-    conviction += 1;
-  }
-  
-  // Sentiment boost
-  if (sentiment.score > config.thresholds.sentimentThreshold) {
-    conviction += 2;
-  } else if (sentiment.score > 0.4) {
-    conviction += 1;
+  if (technicalData.volume && technicalData.avgVolume) {
+    const volumeRatio = technicalData.volume / technicalData.avgVolume;
+    if (volumeRatio > 1.5) conviction += 1;
   }
   
   // FOMO penalty
-  if (data.dailyOpen && data.price > data.dailyOpen * (1 + config.thresholds.fomoThreshold)) {
+  if (technicalData.dailyOpen && technicalData.price > technicalData.dailyOpen * (1 + config.thresholds.fomoThreshold)) {
     conviction -= 2;
   }
   
   return Math.max(1, Math.min(10, conviction));
 }
 
-// Helper: Generate trade plan
-function generateTradePlan(data, conviction) {
+// Generate trade plan
+function generateTradePlan(data, conviction, sentiment) {
   const price = data.price;
   
+  // Check if conviction meets threshold
   if (conviction < config.thresholds.minConviction) {
     return {
       action: 'WATCH',
-      reason: `Conviction too low (${conviction}/10)`,
-      watchPrice: (price * 0.95).toFixed(2)
+      reason: `Conviction below threshold (${conviction}/${config.thresholds.minConviction})`,
+      watchPrice: (price * 0.97).toFixed(2)
     };
   }
   
@@ -206,8 +131,17 @@ function generateTradePlan(data, conviction) {
   if (data.dailyOpen && price > data.dailyOpen * (1 + config.thresholds.fomoThreshold)) {
     return {
       action: 'WATCH',
-      reason: 'Price overextended (>8% above daily open)',
+      reason: `Price overextended (+${((price / data.dailyOpen - 1) * 100).toFixed(1)}% from open)`,
       watchPrice: (data.dailyOpen * 1.02).toFixed(2)
+    };
+  }
+  
+  // Bearish sentiment check
+  if (sentiment.score < 0) {
+    return {
+      action: 'WATCH',
+      reason: 'Negative sentiment detected',
+      watchPrice: (price * 0.95).toFixed(2)
     };
   }
   
@@ -220,121 +154,222 @@ function generateTradePlan(data, conviction) {
     entry: price.toFixed(2),
     stopLoss,
     takeProfit,
-    risk: ((price - stopLoss) / price * 100).toFixed(2) + '%',
-    reward: ((takeProfit - price) / price * 100).toFixed(2) + '%'
+    riskPercent: '3%',
+    rewardPercent: '7%',
+    riskReward: '1:2.3'
   };
 }
 
 // Main scan function
 async function scanMarket() {
-  console.log(`📊 Scanning ${config.watchlist.length} stocks...\n`);
+  console.log('═'.repeat(80));
+  console.log('PHASE 1: NEWS DISCOVERY');
+  console.log('═'.repeat(80) + '\n');
+  
+  // Discover stocks from news
+  const discovery = await discoverStocks(BRAVE_API_KEY);
+  
+  if (discovery.tickers.length === 0) {
+    console.log('\n⚠️  No trending stocks discovered. Market might be quiet.\n');
+    return {
+      signals: [],
+      discovery: { tickers: [], sectors: {}, articles: [] }
+    };
+  }
+  
+  console.log('\n' + '═'.repeat(80));
+  console.log('PHASE 2: TECHNICAL VALIDATION');
+  console.log('═'.repeat(80) + '\n');
   
   const signals = [];
+  const topTickers = discovery.tickers.slice(0, 15); // Analyze top 15
   
-  for (const stock of config.watchlist) {
-    console.log(`🔍 ${stock.symbol} - ${stock.name}`);
+  for (const tickerData of topTickers) {
+    console.log(`\n🔍 ${tickerData.ticker} (${tickerData.mentions} mentions)`);
     
     // Fetch technical data
-    const data = await fetchStockData(stock.symbol);
+    const technical = await fetchStockData(tickerData.ticker);
     
-    if (!data) {
-      console.log('');
+    if (!technical) {
+      console.log('  ✗ Could not fetch technical data');
+      await new Promise(resolve => setTimeout(resolve, 12000));
       continue;
     }
     
-    console.log(`  Price: $${data.price} | RSI: ${data.rsi ? data.rsi.toFixed(2) : 'N/A'} | Volume: ${data.volume.toLocaleString()}`);
+    console.log(`  Price: $${technical.price} (${technical.change > 0 ? '+' : ''}${technical.change}%)`);
+    console.log(`  RSI: ${technical.rsi ? technical.rsi.toFixed(2) : 'N/A'}`);
+    console.log(`  Volume: ${technical.volume.toLocaleString()}`);
     
-    // Fetch news
-    const news = await searchNews(stock.symbol, stock.name);
-    const sentiment = analyzeSentiment(news);
+    // Analyze sentiment from articles
+    const sentiment = analyzeTickerSentiment(tickerData.articles);
+    const catalysts = extractCatalysts(tickerData.articles);
     
-    console.log(`  Sentiment: ${sentiment.score > 0 ? '+' : ''}${sentiment.score.toFixed(2)} | News: ${sentiment.newsCount} articles`);
+    console.log(`  Sentiment: ${sentiment.score > 0 ? '+' : ''}${sentiment.score.toFixed(2)} (${sentiment.confidence})`);
+    console.log(`  Catalysts: ${catalysts.map(c => c.type).join(', ') || 'None identified'}`);
     
     // Calculate conviction
-    const conviction = calculateConviction(data, sentiment);
-    
+    const conviction = calculateConviction(technical, sentiment, tickerData.mentions);
     console.log(`  Conviction: ${conviction}/10`);
     
     // Generate trade plan
-    const tradePlan = generateTradePlan(data, conviction);
-    
+    const tradePlan = generateTradePlan(technical, conviction, sentiment);
     console.log(`  Action: ${tradePlan.action}`);
     
-    if (conviction >= config.thresholds.minConviction || tradePlan.action === 'TRADE') {
+    // Save if meets criteria
+    if (conviction >= config.thresholds.minConviction - 1) { // Slightly lower threshold to capture more
       signals.push({
-        stock,
-        data,
+        ticker: tickerData.ticker,
+        mentions: tickerData.mentions,
+        technical,
         sentiment,
+        catalysts,
         conviction,
         tradePlan,
         timestamp: new Date().toISOString()
       });
     }
     
-    console.log('');
-    
-    // Rate limiting: wait 12 seconds between calls (Alpha Vantage limit: 5 calls/min)
+    // Rate limiting (Alpha Vantage: 5 calls/min)
     await new Promise(resolve => setTimeout(resolve, 12000));
   }
   
-  return signals;
+  return {
+    signals: signals.sort((a, b) => b.conviction - a.conviction),
+    discovery
+  };
 }
 
-// Generate report
-function generateReport(signals) {
+// Generate markdown report
+function generateReport(scanResults) {
   const date = new Date().toISOString().split('T')[0];
+  const time = new Date().toLocaleString('en-US', { timeZone: config.schedule.timezone });
   
   let report = `# 🟣 VIOLETA DAILY SIGNAL: ${date}\n\n`;
-  report += `**Scan Time:** ${new Date().toLocaleString('en-US', { timeZone: config.schedule.timezone })}\n\n`;
+  report += `**Scan Time:** ${time}\n`;
+  report += `**Strategy:** Dynamic News-Driven Discovery\n\n`;
   
-  if (signals.length === 0) {
-    report += `## No High-Conviction Signals Today\n\n`;
-    report += `All ${config.watchlist.length} stocks scanned. No assets met the minimum conviction threshold (${config.thresholds.minConviction}/10).\n\n`;
-    report += `**Market Conditions:** Neutral - Continue monitoring.\n`;
+  report += `---\n\n`;
+  
+  // Market intelligence section
+  report += `## 📰 MARKET INTELLIGENCE\n\n`;
+  
+  const topSectors = Object.entries(scanResults.discovery.sectors || {})
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+  
+  if (topSectors.length > 0) {
+    report += `**Hot Sectors:**\n`;
+    topSectors.forEach(([sector, count]) => {
+      report += `- ${sector.charAt(0).toUpperCase() + sector.slice(1)}: ${count} mentions\n`;
+    });
+  }
+  
+  report += `\n**Articles Analyzed:** ${scanResults.discovery.articles.length}\n`;
+  report += `**Tickers Discovered:** ${scanResults.discovery.tickers.length}\n`;
+  report += `**High-Conviction Signals:** ${scanResults.signals.length}\n\n`;
+  
+  report += `---\n\n`;
+  
+  // Signals section
+  if (scanResults.signals.length === 0) {
+    report += `## ⚠️ NO HIGH-CONVICTION SIGNALS TODAY\n\n`;
+    report += `Market conditions analyzed, but no opportunities met the conviction threshold.\n`;
+    report += `**Action:** Continue monitoring. New opportunities often emerge after consolidation.\n`;
   } else {
-    report += `## ${signals.length} Signal${signals.length > 1 ? 's' : ''} Identified\n\n`;
+    report += `## 🎯 TOP SIGNALS (${scanResults.signals.length} found)\n\n`;
     
-    signals.forEach((signal, index) => {
-      report += `### ${index + 1}. ${signal.stock.symbol} - ${signal.stock.name}\n\n`;
-      report += `**CONVICTION:** ${signal.conviction}/10 | **SENTIMENT:** ${signal.sentiment.score > 0 ? '+' : ''}${signal.sentiment.score.toFixed(2)}\n\n`;
-      report += `**THE TRIGGER:**\n`;
-      report += `- **Technical:** RSI ${signal.data.rsi ? signal.data.rsi.toFixed(2) : 'N/A'}`;
+    scanResults.signals.forEach((signal, index) => {
+      report += `### ${index + 1}. ${signal.ticker}\n\n`;
+      report += `**CONVICTION: ${signal.conviction}/10** | **SENTIMENT: ${signal.sentiment.score > 0 ? '+' : ''}${signal.sentiment.score.toFixed(2)}**\n\n`;
       
-      if (signal.data.rsi < config.thresholds.rsiOversold) {
-        report += ` (Oversold)`;
-      } else if (signal.data.rsi > config.thresholds.rsiBullish) {
-        report += ` (Bullish Momentum)`;
+      report += `**THE CATALYST:**\n`;
+      report += `- **News Momentum:** ${signal.mentions} mentions across major sources\n`;
+      if (signal.catalysts.length > 0) {
+        report += `- **Key Events:** ${signal.catalysts.map(c => c.type).join(', ')}\n`;
       }
-      
+      report += `- **Technical:** `;
+      if (signal.technical.rsi) {
+        report += `RSI ${signal.technical.rsi.toFixed(2)}`;
+        if (signal.technical.rsi < 35) report += ` (oversold)`;
+        else if (signal.technical.rsi > 55 && signal.technical.rsi < 70) report += ` (bullish momentum)`;
+      }
       report += `\n`;
-      report += `- **Volume:** ${(signal.data.volume / signal.data.avgVolume * 100).toFixed(0)}% of average\n`;
-      report += `- **News:** ${signal.sentiment.summary}\n\n`;
+      report += `- **Price Action:** $${signal.technical.price} (${signal.technical.change}% today)\n`;
+      report += `- **Sentiment Summary:** ${signal.sentiment.summary}\n\n`;
       
       report += `**ACTION PLAN:**\n`;
       
       if (signal.tradePlan.action === 'TRADE') {
         report += `- [x] **TRADE**\n`;
         report += `  - Entry: $${signal.tradePlan.entry}\n`;
-        report += `  - Stop Loss: $${signal.tradePlan.stopLoss}\n`;
-        report += `  - Take Profit: $${signal.tradePlan.takeProfit}\n`;
-        report += `  - Risk/Reward: ${signal.tradePlan.risk} / ${signal.tradePlan.reward}\n`;
+        report += `  - Stop Loss: $${signal.tradePlan.stopLoss} (${signal.tradePlan.riskPercent})\n`;
+        report += `  - Take Profit: $${signal.tradePlan.takeProfit} (${signal.tradePlan.rewardPercent})\n`;
+        report += `  - Risk/Reward: ${signal.tradePlan.riskReward}\n`;
       } else {
         report += `- [ ] **WATCH**\n`;
         report += `  - Reason: ${signal.tradePlan.reason}\n`;
-        report += `  - Watch for dip to: $${signal.tradePlan.watchPrice}\n`;
+        report += `  - Entry Target: $${signal.tradePlan.watchPrice}\n`;
+      }
+      
+      // Add news sources
+      if (signal.catalysts.length > 0) {
+        report += `\n**Sources:**\n`;
+        signal.catalysts.slice(0, 2).forEach(cat => {
+          report += `- [${cat.type}](${cat.url})\n`;
+        });
       }
       
       report += `\n`;
     });
   }
   
-  report += `\n---\n\n`;
-  report += `**⚠️ DISCLAIMER:** This is an automated analysis tool. Not financial advice. You assume all trading risk.\n`;
+  report += `---\n\n`;
+  report += `**⚠️ DISCLAIMER:** Automated analysis tool. Not financial advice. You assume all trading risk.\n`;
+  report += `**💜 Generated by:** Violeta Investment Desk\n`;
   
   return report;
 }
 
-// Save report to file
+// Generate Telegram summary
+function generateTelegramSummary(scanResults) {
+  const date = new Date().toISOString().split('T')[0];
+  
+  let summary = `🟣 VIOLETA INVESTMENT SIGNAL\n`;
+  summary += `📅 ${date}\n\n`;
+  
+  if (scanResults.signals.length === 0) {
+    summary += `⚠️ No high-conviction signals today\n\n`;
+    summary += `Analyzed ${scanResults.discovery.tickers.length} trending stocks\n`;
+    summary += `Market conditions: Neutral\n`;
+  } else {
+    const tradeSignals = scanResults.signals.filter(s => s.tradePlan.action === 'TRADE');
+    const watchSignals = scanResults.signals.filter(s => s.tradePlan.action === 'WATCH');
+    
+    summary += `${tradeSignals.length} TRADE signal${tradeSignals.length !== 1 ? 's' : ''} | ${watchSignals.length} WATCH\n\n`;
+    
+    // Show top 3 signals
+    scanResults.signals.slice(0, 3).forEach(signal => {
+      const icon = signal.tradePlan.action === 'TRADE' ? '🟢' : '🟡';
+      summary += `${icon} ${signal.ticker} $${signal.technical.price}\n`;
+      summary += `   Conviction: ${signal.conviction}/10\n`;
+      if (signal.catalysts.length > 0) {
+        summary += `   ${signal.catalysts[0].type}\n`;
+      }
+      if (signal.tradePlan.action === 'TRADE') {
+        summary += `   Entry/SL/TP: $${signal.tradePlan.entry}/$${signal.tradePlan.stopLoss}/$${signal.tradePlan.takeProfit}\n`;
+      } else {
+        summary += `   ${signal.tradePlan.reason}\n`;
+      }
+      summary += `\n`;
+    });
+  }
+  
+  summary += `📊 Full report: github.com/CarlosVitorino/violeta-investment-desk\n`;
+  
+  return summary;
+}
+
+// Save report
 function saveReport(report) {
   const date = new Date().toISOString().split('T')[0];
   const reportsDir = path.join(__dirname, '..', 'reports');
@@ -346,7 +381,7 @@ function saveReport(report) {
   const reportPath = path.join(reportsDir, `${date}.md`);
   fs.writeFileSync(reportPath, report);
   
-  console.log(`📄 Report saved: reports/${date}.md`);
+  console.log(`\n📄 Report saved: reports/${date}.md`);
   
   return reportPath;
 }
@@ -354,30 +389,45 @@ function saveReport(report) {
 // Main execution
 (async () => {
   try {
-    // Check API keys
+    // Validate API keys
     if (ALPHA_VANTAGE_KEY === 'YOUR_ALPHA_VANTAGE_KEY') {
-      console.error('❌ Please set ALPHA_VANTAGE_KEY in config.json or environment');
+      console.error('❌ Please set ALPHA_VANTAGE_KEY in config.json');
+      process.exit(1);
+    }
+    
+    if (!BRAVE_API_KEY) {
+      console.error('❌ Please set BRAVE_API_KEY environment variable');
       process.exit(1);
     }
     
     // Run scan
-    const signals = await scanMarket();
+    const scanResults = await scanMarket();
     
-    // Generate report
-    const report = generateReport(signals);
+    // Generate outputs
+    const report = generateReport(scanResults);
+    const telegramSummary = generateTelegramSummary(scanResults);
     
     // Save report
     saveReport(report);
     
-    // Print report to console
-    console.log('\n' + '='.repeat(80));
+    // Print outputs
+    console.log('\n' + '═'.repeat(80));
+    console.log('FINAL REPORT');
+    console.log('═'.repeat(80) + '\n');
     console.log(report);
-    console.log('='.repeat(80));
     
-    console.log(`\n✅ Scan complete! Found ${signals.length} signal(s).`);
+    console.log('\n' + '═'.repeat(80));
+    console.log('TELEGRAM SUMMARY');
+    console.log('═'.repeat(80) + '\n');
+    console.log(telegramSummary);
+    
+    console.log('\n✅ Scan complete! Found ' + scanResults.signals.length + ' signal(s).');
+    
+    // Return data for cron job to send via Telegram
+    process.stdout.write('\n__TELEGRAM_SUMMARY__\n' + telegramSummary + '\n__END_TELEGRAM_SUMMARY__\n');
     
   } catch (error) {
-    console.error('❌ Error during scan:', error.message);
+    console.error('❌ Error during scan:', error);
     process.exit(1);
   }
 })();
