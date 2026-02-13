@@ -76,6 +76,45 @@ async function fetchRSI(symbol) {
   }
 }
 
+// Fetch company information from Alpha Vantage
+async function fetchCompanyInfo(symbol) {
+  try {
+    const url = `https://www.alphavantage.co/query?function=OVERVIEW&symbol=${symbol}&apikey=${ALPHA_VANTAGE_KEY}`;
+    const res = await axios.get(url, { timeout: 10000 });
+    
+    if (res.data['Error Message'] || res.data['Note'] || !res.data['Name']) {
+      return null;
+    }
+    
+    return {
+      name: res.data['Name'],
+      isin: res.data['ISIN'] || 'N/A',
+      sector: res.data['Sector'] || 'N/A',
+      industry: res.data['Industry'] || 'N/A',
+      country: res.data['Country'] || 'N/A',
+      description: res.data['Description'] || ''
+    };
+  } catch (error) {
+    console.log(`  ⚠️ Could not fetch company info for ${symbol}`);
+    return null;
+  }
+}
+
+// Validate ticker symbol
+function isValidTicker(ticker) {
+  // Must be at least 3 characters (filters out "I", "AI", "ML", etc.)
+  if (!ticker || ticker.length < 3) return false;
+  
+  // Must be uppercase
+  if (ticker !== ticker.toUpperCase()) return false;
+  
+  // Filter out common non-ticker words
+  const commonWords = ['CEO', 'CFO', 'COO', 'CTO', 'CIO', 'USA', 'GDP', 'IPO', 'EPS', 'P/E', 'AI', 'ML', 'THE', 'AND', 'FOR', 'ARE', 'BUT', 'NOT', 'HAD', 'HER', 'WAS', 'ONE', 'OUR', 'OUT', 'DAY', 'GET', 'HAS', 'HIM', 'HIS', 'HOW', 'ITS', 'MAY', 'NEW', 'NOW', 'OLD', 'SEE', 'TWO', 'WAY', 'WHO', 'BOY', 'DID', 'DAD', 'EYE', 'MOM', 'SHE', 'USE', 'DUE', 'FED', 'TAX', 'BUY', 'SELL', 'PUT', 'CALL', 'USD', 'EUR', 'GBP', 'JPY', 'ETF'];
+  if (commonWords.includes(ticker)) return false;
+  
+  return true;
+}
+
 // Calculate conviction score
 function calculateConviction(technicalData, sentiment, mentions) {
   let conviction = 5; // Base score
@@ -177,15 +216,31 @@ async function scanMarket() {
     };
   }
   
+  // Filter valid tickers
+  console.log(`\n📊 Filtered ${discovery.tickers.length} tickers for valid symbols...`);
+  const validTickers = discovery.tickers.filter(t => isValidTicker(t.ticker));
+  console.log(`✅ ${validTickers.length} valid tickers remaining\n`);
+  
   console.log('\n' + '═'.repeat(80));
   console.log('PHASE 2: TECHNICAL VALIDATION');
   console.log('═'.repeat(80) + '\n');
   
   const signals = [];
-  const topTickers = discovery.tickers.slice(0, 15); // Analyze top 15
+  const topTickers = validTickers.slice(0, 15); // Analyze top 15 valid tickers
   
   for (const tickerData of topTickers) {
     console.log(`\n🔍 ${tickerData.ticker} (${tickerData.mentions} mentions)`);
+    
+    // Fetch company info
+    console.log('  📋 Fetching company information...');
+    const companyInfo = await fetchCompanyInfo(tickerData.ticker);
+    
+    if (companyInfo) {
+      console.log(`  🏢 ${companyInfo.name}`);
+      console.log(`     ISIN: ${companyInfo.isin} | ${companyInfo.sector}`);
+    } else {
+      console.log('  ⚠️ Company info unavailable');
+    }
     
     // Fetch technical data
     const technical = await fetchStockData(tickerData.ticker);
@@ -219,6 +274,7 @@ async function scanMarket() {
     if (conviction >= config.thresholds.minConviction - 1) { // Slightly lower threshold to capture more
       signals.push({
         ticker: tickerData.ticker,
+        company: companyInfo,
         mentions: tickerData.mentions,
         technical,
         sentiment,
@@ -229,8 +285,8 @@ async function scanMarket() {
       });
     }
     
-    // Rate limiting (Alpha Vantage: 5 calls/min)
-    await new Promise(resolve => setTimeout(resolve, 12000));
+    // Rate limiting (Alpha Vantage: 5 calls/min - now 6 calls with company info)
+    await new Promise(resolve => setTimeout(resolve, 15000)); // Increased to 15s for 6th API call
   }
   
   return {
@@ -279,7 +335,12 @@ function generateReport(scanResults) {
     report += `## 🎯 TOP SIGNALS (${scanResults.signals.length} found)\n\n`;
     
     scanResults.signals.forEach((signal, index) => {
-      report += `### ${index + 1}. ${signal.ticker}\n\n`;
+      const companyName = signal.company?.name || signal.ticker;
+      const isin = signal.company?.isin || 'N/A';
+      const sector = signal.company?.sector || 'N/A';
+      
+      report += `### ${index + 1}. ${companyName} (${signal.ticker})\n\n`;
+      report += `**ISIN:** ${isin} | **Sector:** ${sector}\n\n`;
       report += `**CONVICTION: ${signal.conviction}/10** | **SENTIMENT: ${signal.sentiment.score > 0 ? '+' : ''}${signal.sentiment.score.toFixed(2)}**\n\n`;
       
       report += `**THE CATALYST:**\n`;
@@ -350,7 +411,9 @@ function generateTelegramSummary(scanResults) {
     // Show top 3 signals
     scanResults.signals.slice(0, 3).forEach(signal => {
       const icon = signal.tradePlan.action === 'TRADE' ? '🟢' : '🟡';
-      summary += `${icon} ${signal.ticker} $${signal.technical.price}\n`;
+      const companyName = signal.company?.name || signal.ticker;
+      summary += `${icon} ${companyName} (${signal.ticker})\n`;
+      summary += `   ISIN: ${signal.company?.isin || 'N/A'}\n`;
       summary += `   Conviction: ${signal.conviction}/10\n`;
       if (signal.catalysts.length > 0) {
         summary += `   ${signal.catalysts[0].type}\n`;
