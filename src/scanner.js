@@ -270,23 +270,24 @@ async function scanMarket() {
     const tradePlan = generateTradePlan(technical, conviction, sentiment);
     console.log(`  Action: ${tradePlan.action}`);
     
-    // Save if meets criteria
-    if (conviction >= config.thresholds.minConviction - 1) { // Slightly lower threshold to capture more
-      signals.push({
-        ticker: tickerData.ticker,
-        company: companyInfo,
-        mentions: tickerData.mentions,
-        technical,
-        sentiment,
-        catalysts,
-        conviction,
-        tradePlan,
-        timestamp: new Date().toISOString()
-      });
-    }
+    // Save ALL analyzed signals (even low conviction)
+    signals.push({
+      ticker: tickerData.ticker,
+      company: companyInfo,
+      mentions: tickerData.mentions,
+      technical,
+      sentiment,
+      catalysts,
+      conviction,
+      tradePlan,
+      timestamp: new Date().toISOString()
+    });
     
-    // Rate limiting (Alpha Vantage: 5 calls/min - now 6 calls with company info)
-    await new Promise(resolve => setTimeout(resolve, 15000)); // Increased to 15s for 6th API call
+    // Rate limiting (Alpha Vantage: 5 calls/min, but we make 6 calls per ticker)
+    // Global quote (1) + RSI (1) + Company info (1) = 3 calls, but company info is separate endpoint
+    // Actually: Global quote, RSI, and Company info = 3 calls per ticker
+    // But company info is also limited, so we need 15s minimum
+    await new Promise(resolve => setTimeout(resolve, 15000)); // 15s = 4 calls/min, safe buffer
   }
   
   return {
@@ -320,20 +321,41 @@ function generateReport(scanResults) {
     });
   }
   
+  const totalAnalyzed = scanResults.signals.length;
+  const highConviction = scanResults.signals.filter(s => s.conviction >= config.thresholds.minConviction).length;
+  
   report += `\n**Articles Analyzed:** ${scanResults.discovery.articles.length}\n`;
   report += `**Tickers Discovered:** ${scanResults.discovery.tickers.length}\n`;
-  report += `**High-Conviction Signals:** ${scanResults.signals.length}\n\n`;
+  report += `**Tickers Analyzed:** ${totalAnalyzed}\n`;
+  report += `**High-Conviction Signals:** ${highConviction}\n\n`;
   
   report += `---\n\n`;
   
   // Signals section
-  if (scanResults.signals.length === 0) {
-    report += `## ⚠️ NO HIGH-CONVICTION SIGNALS TODAY\n\n`;
-    report += `Market conditions analyzed, but no opportunities met the conviction threshold.\n`;
+  const highConvictionSignals = scanResults.signals.filter(s => s.conviction >= config.thresholds.minConviction);
+  
+  if (highConvictionSignals.length === 0 && scanResults.signals.length === 0) {
+    report += `## ⚠️ NO SIGNALS ANALYZED TODAY\n\n`;
+    report += `Market conditions analyzed, but no valid tickers discovered.\n`;
     report += `**Action:** Continue monitoring. New opportunities often emerge after consolidation.\n`;
-  } else {
-    report += `## 🎯 TOP SIGNALS (${scanResults.signals.length} found)\n\n`;
+  } else if (highConvictionSignals.length === 0) {
+    // Show top 5 signals even if below threshold
+    const topSignals = scanResults.signals.slice(0, 5);
+    report += `## 📊 MARKET SCAN (No high-conviction signals today)\n\n`;
+    report += `⚠️ **All signals below ${config.thresholds.minConviction}/10 conviction threshold. Showing top ${topSignals.length} for reference only.**\n\n`;
+    report += `**Action:** WATCH ONLY - Do not trade without additional confirmation.\n\n`;
     
+    // Use topSignals instead of full list
+    scanResults.signals = topSignals;
+    report += `## 🔍 TOP WATCH LIST (${topSignals.length} tickers)\n\n`;
+  } else {
+    report += `## 🎯 TOP SIGNALS (${highConvictionSignals.length} found)\n\n`;
+    // Only show high-conviction signals for trading
+    scanResults.signals = highConvictionSignals;
+  }
+  
+  // Show signal details (if any exist)
+  if (scanResults.signals.length > 0) {
     scanResults.signals.forEach((signal, index) => {
       const companyName = signal.company?.name || signal.ticker;
       const isin = signal.company?.isin || 'N/A';
@@ -394,22 +416,39 @@ function generateReport(scanResults) {
 // Generate Telegram summary
 function generateTelegramSummary(scanResults) {
   const date = new Date().toISOString().split('T')[0];
+  const highConvictionSignals = scanResults.signals.filter(s => s.conviction >= config.thresholds.minConviction);
   
   let summary = `🟣 VIOLETA INVESTMENT SIGNAL\n`;
   summary += `📅 ${date}\n\n`;
   
-  if (scanResults.signals.length === 0) {
+  if (highConvictionSignals.length === 0 && scanResults.signals.length === 0) {
     summary += `⚠️ No high-conviction signals today\n\n`;
     summary += `Analyzed ${scanResults.discovery.tickers.length} trending stocks\n`;
     summary += `Market conditions: Neutral\n`;
+  } else if (highConvictionSignals.length === 0) {
+    // Show top analyzed tickers even though conviction is low
+    summary += `📊 Market Scan (no high-conviction signals)\n\n`;
+    summary += `Analyzed ${scanResults.signals.length} tickers\n`;
+    summary += `Top watch (below ${config.thresholds.minConviction}/10 threshold):\n\n`;
+    
+    scanResults.signals.slice(0, 3).forEach(signal => {
+      const companyName = signal.company?.name || signal.ticker;
+      summary += `🔍 ${companyName} ($${signal.ticker})\n`;
+      summary += `   Conviction: ${signal.conviction}/10 | Sentiment: ${signal.sentiment.score > 0 ? '+' : ''}${signal.sentiment.score.toFixed(2)}\n`;
+      summary += `   Price: $${signal.technical.price} (${signal.technical.change}%)\n`;
+      if (signal.catalysts.length > 0) {
+        summary += `   Catalyst: ${signal.catalysts[0].type}\n`;
+      }
+      summary += `\n`;
+    });
   } else {
-    const tradeSignals = scanResults.signals.filter(s => s.tradePlan.action === 'TRADE');
-    const watchSignals = scanResults.signals.filter(s => s.tradePlan.action === 'WATCH');
+    const tradeSignals = highConvictionSignals.filter(s => s.tradePlan.action === 'TRADE');
+    const watchSignals = highConvictionSignals.filter(s => s.tradePlan.action === 'WATCH');
     
     summary += `${tradeSignals.length} TRADE signal${tradeSignals.length !== 1 ? 's' : ''} | ${watchSignals.length} WATCH\n\n`;
     
-    // Show top 3 signals
-    scanResults.signals.slice(0, 3).forEach(signal => {
+    // Show top 3 high-conviction signals
+    highConvictionSignals.slice(0, 3).forEach(signal => {
       const icon = signal.tradePlan.action === 'TRADE' ? '🟢' : '🟡';
       const companyName = signal.company?.name || signal.ticker;
       summary += `${icon} ${companyName} (${signal.ticker})\n`;
