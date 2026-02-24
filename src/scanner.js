@@ -108,8 +108,29 @@ function isValidTicker(ticker) {
   // Must be uppercase
   if (ticker !== ticker.toUpperCase()) return false;
   
-  // Filter out common non-ticker words
-  const commonWords = ['CEO', 'CFO', 'COO', 'CTO', 'CIO', 'USA', 'GDP', 'IPO', 'EPS', 'P/E', 'AI', 'ML', 'THE', 'AND', 'FOR', 'ARE', 'BUT', 'NOT', 'HAD', 'HER', 'WAS', 'ONE', 'OUR', 'OUT', 'DAY', 'GET', 'HAS', 'HIM', 'HIS', 'HOW', 'ITS', 'MAY', 'NEW', 'NOW', 'OLD', 'SEE', 'TWO', 'WAY', 'WHO', 'BOY', 'DID', 'DAD', 'EYE', 'MOM', 'SHE', 'USE', 'DUE', 'FED', 'TAX', 'BUY', 'SELL', 'PUT', 'CALL', 'USD', 'EUR', 'GBP', 'JPY', 'ETF'];
+  // Filter out common non-ticker words (expanded list)
+  const commonWords = [
+    // Corporate titles
+    'CEO', 'CFO', 'COO', 'CTO', 'CIO', 'EVP', 'SVP', 'CMO', 'CPO',
+    // Financial terms
+    'GDP', 'IPO', 'EPS', 'ETF', 'ESG', 'ROE', 'ROI', 'YOY', 'QOQ', 'ATH', 'ATL',
+    // Market/Trading
+    'BUY', 'SELL', 'PUT', 'CALL', 'NYSE', 'FTSE', 'DOW', 'ASX',
+    // Currencies
+    'USD', 'EUR', 'GBP', 'JPY', 'CHF', 'AUD', 'CAD', 'CNY',
+    // Tech buzzwords
+    'AI', 'ML', 'IOT', 'API', 'SaaS', 'GPU', 'CPU', 'RAM', 'NFT', 'DAO', 'DeFi', 'WEB3', 'VR', 'AR',
+    // Countries/Regions
+    'USA', 'UK', 'EU', 'UAE', 'APAC',
+    // Common words
+    'THE', 'AND', 'FOR', 'ARE', 'BUT', 'NOT', 'WAS', 'ALL', 'CAN', 'HAD', 'HER', 'HAS', 'HIM', 'HIS', 'HOW',
+    'ITS', 'MAY', 'NEW', 'NOW', 'OLD', 'ONE', 'OUR', 'OUT', 'OWN', 'SAY', 'SEE', 'SHE', 'TWO', 'USE', 'WAY',
+    'WHO', 'WIN', 'YES', 'YET', 'YOU', 'DAY', 'DID', 'GET', 'GOT', 'LET', 'MET', 'RUN', 'SET', 'TOP', 'TRY',
+    // Organizations
+    'FED', 'SEC', 'IMF', 'OECD', 'NATO', 'OPEC', 'WHO', 'FDA',
+    // Misc financial
+    'TAX', 'VAT', 'ESG', 'IPO', 'M&A', 'PE', 'VC', 'REIT'
+  ];
   if (commonWords.includes(ticker)) return false;
   
   return true;

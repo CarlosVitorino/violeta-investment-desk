@@ -43,26 +43,33 @@ const SEARCH_QUERIES = [
 // Extract ticker symbols from text
 function extractTickers(text) {
   // Match patterns like: AAPL, MSFT, $NVDA, (TSLA), etc.
+  // More strict patterns to avoid false positives
   const patterns = [
-    /\b[A-Z]{1,5}\b(?=\s+(?:stock|shares|shares|rose|fell|gained|dropped))/g,
-    /\$[A-Z]{1,5}\b/g,
-    /\([A-Z]{1,5}\)/g,
-    /\bNYSE:\s*([A-Z]{1,5})\b/g,
-    /\bNASDAQ:\s*([A-Z]{1,5})\b/g
+    // Explicit ticker markers (highest confidence)
+    /\$([A-Z]{3,5})\b/g,                                    // $AAPL, $MSFT
+    /\(([A-Z]{3,5})\)/g,                                    // (TSLA), (NVDA)
+    /\bNYSE:\s*([A-Z]{3,5})\b/g,                            // NYSE: AAPL
+    /\bNASDAQ:\s*([A-Z]{3,5})\b/g,                          // NASDAQ: MSFT
+    
+    // Contextual patterns (medium confidence - only 3-5 chars)
+    /\b([A-Z]{3,5})\b(?=\s+(?:stock|shares|rose|fell|gained|dropped|surged|jumped|rallied))/g,
+    /(?:stock|shares)\s+([A-Z]{3,5})\b/g,                  // "stock AAPL", "shares TSLA"
+    /\b([A-Z]{3,5})\s+\([A-Z]{3,5}\)/g                      // Apple AAPL (AAPL)
   ];
   
   const tickers = new Set();
   
   patterns.forEach(pattern => {
-    const matches = text.match(pattern);
-    if (matches) {
-      matches.forEach(match => {
-        // Clean up the ticker
-        let ticker = match.replace(/[$()NYSE:NASDAQ:\s]/g, '');
-        if (ticker.length >= 1 && ticker.length <= 5) {
-          tickers.add(ticker);
-        }
-      });
+    const matches = text.matchAll(pattern);
+    for (const match of matches) {
+      // Extract ticker from capture group or full match
+      let ticker = match[1] || match[0];
+      // Clean up
+      ticker = ticker.replace(/[$()NYSE:NASDAQ:\s]/g, '');
+      // Only accept 3-5 character tickers (filters out AI, US, etc.)
+      if (ticker.length >= 3 && ticker.length <= 5) {
+        tickers.add(ticker);
+      }
     }
   });
   
